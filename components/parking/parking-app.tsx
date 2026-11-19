@@ -21,6 +21,8 @@ import {
 type NavEntry = { id: ScreenId; label: string; mobileLabel: string; detail: string; icon: ReactNode }
 type Feedback = Record<string, { tone: "error" | "success"; text: string }>
 
+const VEHICLE_RESERVATION_CONFLICT_MESSAGE = "This vehicle already has an overlapping reservation. Choose another vehicle or time."
+
 function navigationFor(role: Role): NavEntry[] {
   if (role === "student" || role === "visitor") return [
     { id: "search", label: "Find parking", mobileLabel: "Find", detail: "Map & eligible bays", icon: <MapPin size={18} /> },
@@ -169,10 +171,22 @@ export function ParkingApp() {
     return closureConflict || reservationConflict || externalConflict
   }, [store.closures, store.externalBookings, store.reservations])
 
+  const hasVehicleOverlap = useCallback((candidateVehicleId: string, candidateDate: string, candidateStart: string, candidateEnd: string) => {
+    const start = toLocalDateTime(candidateDate, candidateStart)
+    const end = toLocalDateTime(candidateDate, candidateEnd)
+    return store.reservations.some((reservation) => {
+      if (reservation.vehicleId !== candidateVehicleId || reservation.date !== candidateDate) return false
+      if (reservation.status === "Checked In") return end > toLocalDateTime(reservation.date, reservation.startTime)
+      return reservation.status === "Reserved" && hasTimeOverlap(start, end, toLocalDateTime(reservation.date, reservation.startTime), toLocalDateTime(reservation.date, reservation.endTime))
+    })
+  }, [store.reservations])
+  const vehicleConflict = !!activeVehicle && !validationError && hasVehicleOverlap(activeVehicle.id, date, startTime, endTime)
+
   const searchSpaces = useMemo(() => {
-    if (!driverRole || !activeVehicle || validationError) return []
+    if (!driverRole || !activeVehicle || validationError || vehicleConflict) return []
     return store.spaces.filter((space) => space.zoneId === zoneId && isEligible(space, driverRole, activeVehicle) && !overlaps(space.id, date, startTime, endTime))
-  }, [activeVehicle, date, driverRole, endTime, isEligible, overlaps, startTime, store.spaces, validationError, zoneId])
+  }, [activeVehicle, date, driverRole, endTime, isEligible, overlaps, startTime, store.spaces, validationError, vehicleConflict, zoneId])
+
 
   const mapSpaces = useMemo(() => store.spaces.filter((space) => space.zoneId === zoneId), [store.spaces, zoneId])
   const driverMapStates = useMemo(() => Object.fromEntries(mapSpaces.map((space) => {
@@ -180,9 +194,9 @@ export function ParkingApp() {
     if (space.status === "occupied") return [space.id, "occupied"]
     if (!driverRole || !isEligible(space, driverRole, activeVehicle)) return [space.id, "restricted"]
     if (store.closures.some((closure) => closure.spaceId === space.id && closure.date === date && hasTimeOverlap(toLocalDateTime(date, startTime), toLocalDateTime(date, endTime), toLocalDateTime(date, closure.startTime), toLocalDateTime(date, closure.endTime)))) return [space.id, "closed"]
-    if (overlaps(space.id, date, startTime, endTime)) return [space.id, "booked"]
+    if (overlaps(space.id, date, startTime, endTime) || vehicleConflict) return [space.id, "booked"]
     return [space.id, "available"]
-  })) as Record<string, BayVisualState>, [activeVehicle, date, driverRole, endTime, isEligible, mapSpaces, overlaps, searchSpaces, selectedSpaceId, startTime, store.closures])
+  })) as Record<string, BayVisualState>, [activeVehicle, date, driverRole, endTime, isEligible, mapSpaces, overlaps, searchSpaces, selectedSpaceId, startTime, store.closures, vehicleConflict])
 
   const officerSpaces = useMemo(() => store.spaces.filter((space) => officerZoneId === "all" || space.zoneId === officerZoneId), [officerZoneId, store.spaces])
   const allOccupancyStates = useMemo(() => Object.fromEntries(store.spaces.map((space) => {
@@ -290,6 +304,10 @@ export function ParkingApp() {
   function confirmReservation() {
     if (!driverRole || !selectedSpace || !activeVehicle) return
     if (validationError) { setConfirmError(validationError); return }
+    if (hasVehicleOverlap(activeVehicle.id, date, startTime, endTime)) {
+      setConfirmError(VEHICLE_RESERVATION_CONFLICT_MESSAGE)
+      return
+    }
     const liveSpace = store.spaces.find((space) => space.id === selectedSpace.id)
     if (!liveSpace || !isEligible(liveSpace, driverRole, activeVehicle) || overlaps(liveSpace.id, date, startTime, endTime)) {
       setConfirmError(`${selectedSpace.id} is no longer available for this time. No reservation was saved. Return to updated results to choose another bay.`)
@@ -487,7 +505,7 @@ export function ParkingApp() {
         {controlsOpen && controls}
         <nav className="mobile-nav" aria-label="Parking pages">{navEntries.map((item) => <NavButton compact key={item.id} active={screen === item.id || (item.id === "overview" && screen === "bay-detail")} onClick={() => navigate(item.id)} icon={item.icon} label={item.label} mobileLabel={item.mobileLabel} count={item.id === "notifications" ? unreadCount : undefined} />)}</nav>
         <main className="page-content">
-          {(screen === "search" && driverRole) && <DriverSearch role={driverRole} zoneId={zoneId} setZoneId={(value) => { setZoneId(value); setSelectedSpaceId(null) }} zones={store.zones} date={date} setDate={(value) => { setDate(value); setSelectedSpaceId(null) }} startTime={startTime} setStartTime={(value) => { setStartTime(value); setSelectedSpaceId(null) }} endTime={endTime} setEndTime={(value) => { setEndTime(value); setSelectedSpaceId(null) }} vehicles={driverVehicles} vehicleId={activeVehicle?.id ?? ""} setVehicleId={(value) => { setVehicleId(value); setSelectedSpaceId(null) }} zoneSpaces={mapSpaces} results={searchAttempted && validationError ? [] : searchSpaces} mapStates={driverMapStates} selectedSpaceId={selectedSpaceId} onSelectSpace={selectSearchSpace} onContinue={continueToConfirmation} mode={viewMode} setMode={setViewMode} error={searchAttempted ? validationError : ""} onSearch={runSearch} />}
+          {(screen === "search" && driverRole) && <DriverSearch role={driverRole} zoneId={zoneId} setZoneId={(value) => { setZoneId(value); setSelectedSpaceId(null) }} zones={store.zones} date={date} setDate={(value) => { setDate(value); setSelectedSpaceId(null) }} startTime={startTime} setStartTime={(value) => { setStartTime(value); setSelectedSpaceId(null) }} endTime={endTime} setEndTime={(value) => { setEndTime(value); setSelectedSpaceId(null) }} vehicles={driverVehicles} vehicleId={activeVehicle?.id ?? ""} setVehicleId={(value) => { setVehicleId(value); setSelectedSpaceId(null) }} zoneSpaces={mapSpaces} results={searchAttempted && validationError ? [] : searchSpaces} mapStates={driverMapStates} selectedSpaceId={selectedSpaceId} onSelectSpace={selectSearchSpace} onContinue={continueToConfirmation} mode={viewMode} setMode={setViewMode} error={searchAttempted ? validationError || (vehicleConflict ? VEHICLE_RESERVATION_CONFLICT_MESSAGE : "") : ""} onSearch={runSearch} />}
           {(screen === "confirm" && driverRole) && <ConfirmReservation space={selectedSpace} vehicle={activeVehicle} zoneName={store.zones.find((zone) => zone.id === selectedSpace?.zoneId)?.name ?? "Campus parking"} date={date} startTime={startTime} endTime={endTime} arrivalWindowMinutes={store.arrivalWindowMinutes} error={confirmError} onBack={() => { setScreen("search"); setConfirmError("") }} onConfirm={confirmReservation} onUpdatedResults={() => { setScreen("search"); setConfirmError(""); setSearchAttempted(true) }} />}
           {(screen === "reservations" && driverRole) && <ReservationsScreen reservations={currentReservations} spaces={store.spaces} zones={store.zones} vehicles={store.vehicles} simulatedTime={store.simulatedTime} arrivalWindowMinutes={store.arrivalWindowMinutes} onCancel={cancelReservation} onCheckIn={checkIn} onDepart={recordDeparture} feedback={feedback} onFindParking={() => navigate("search")} />}
           {(screen === "vehicles" && driverRole) && <VehiclesScreen vehicles={driverVehicles} permits={store.permitCategories} protectedVehicleIds={store.reservations.filter((reservation) => ["Reserved", "Checked In"].includes(reservation.status)).map((reservation) => reservation.vehicleId)} onSave={saveVehicle} onDelete={deleteVehicle} />}
